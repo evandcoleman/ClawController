@@ -13,7 +13,9 @@ FROM python:3.11-slim
 
 # Install system dependencies + Caddy binary
 RUN apt-get update && apt-get install -y curl \
-    && curl -sL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy \
+    && ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then CADDY_ARCH="arm64"; else CADDY_ARCH="amd64"; fi \
+    && curl -sL "https://caddyserver.com/api/download?os=linux&arch=${CADDY_ARCH}" -o /usr/local/bin/caddy \
     && chmod +x /usr/local/bin/caddy \
     && rm -rf /var/lib/apt/lists/*
 
