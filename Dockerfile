@@ -11,13 +11,7 @@ RUN npm run build
 # Stage 2: Python backend + built frontend
 FROM python:3.11-slim
 
-# Install system dependencies + Caddy binary
-RUN apt-get update && apt-get install -y curl \
-    && ARCH=$(dpkg --print-architecture) \
-    && if [ "$ARCH" = "arm64" ]; then CADDY_ARCH="arm64"; else CADDY_ARCH="amd64"; fi \
-    && curl -sL "https://caddyserver.com/api/download?os=linux&arch=${CADDY_ARCH}" -o /usr/local/bin/caddy \
-    && chmod +x /usr/local/bin/caddy \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -37,45 +31,16 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 # Create logs directory
 RUN mkdir -p logs
 
-# Copy Caddyfile
-COPY Caddyfile /app/Caddyfile
+# Single port — FastAPI serves API + frontend
+EXPOSE 8000
 
-# Expose single port (Caddy proxies both frontend + API)
-EXPOSE 5001
-
-# Environment variables
 ENV PYTHONUNBUFFERED=1
-ENV BACKEND_PORT=8000
-ENV FRONTEND_PORT=5001
 
-# Create entrypoint script
 RUN echo '#!/bin/bash\n\
 set -e\n\
-\n\
-echo "🚀 Starting ClawController..."\n\
-\n\
-# Start backend\n\
 cd /app/backend\n\
 source venv/bin/activate\n\
-python -m uvicorn main:app --host 127.0.0.1 --port 8000 &\n\
-BACKEND_PID=$!\n\
-echo "Backend started (PID: $BACKEND_PID)"\n\
-\n\
-# Start Caddy (reverse proxy + static files on port 5001)\n\
-cd /app\n\
-caddy run --config /app/Caddyfile &\n\
-CADDY_PID=$!\n\
-echo "Caddy started (PID: $CADDY_PID)"\n\
-\n\
-echo ""\n\
-echo "Dashboard: http://localhost:5001"\n\
-echo ""\n\
-\n\
-# Wait for any process to exit\n\
-wait -n\n\
-\n\
-# Exit with status of process that exited first\n\
-exit $?\n\
+exec python -m uvicorn main:app --host 0.0.0.0 --port 8000\n\
 ' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 CMD ["/app/entrypoint.sh"]

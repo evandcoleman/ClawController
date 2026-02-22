@@ -1,8 +1,9 @@
 from dotenv import load_dotenv
 load_dotenv()
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Security, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -3042,3 +3043,27 @@ async def setup_background_monitoring():
     
     # Start background task
     asyncio.create_task(periodic_stuck_task_check())
+
+# Serve frontend static files — mount as fallback after all API routes
+_frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _frontend_dist.is_dir():
+    # Mount static assets (js, css, images)
+    if (_frontend_dist / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="frontend-assets")
+
+    # SPA fallback: serve index.html for any non-API, non-asset path
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import Response as StarletteResponse
+
+    class SPAFallbackMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            response = await call_next(request)
+            path = request.url.path
+            # If 404 and not an API/WS path, serve index.html
+            if response.status_code == 404 and not path.startswith(("/api/", "/ws")):
+                index = _frontend_dist / "index.html"
+                if index.is_file():
+                    return FileResponse(str(index))
+            return response
+
+    app.add_middleware(SPAFallbackMiddleware)
