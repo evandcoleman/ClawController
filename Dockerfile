@@ -11,9 +11,12 @@ RUN npm run build
 # Stage 2: Python backend + built frontend
 FROM python:3.11-slim
 
-# Install system dependencies
+# Install system dependencies + Caddy
 RUN apt-get update && apt-get install -y \
-    curl \
+    curl debian-keyring debian-archive-keyring apt-transport-https \
+    && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+    && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list \
+    && apt-get update && apt-get install -y caddy \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -34,8 +37,11 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 # Create logs directory
 RUN mkdir -p logs
 
-# Expose ports
-EXPOSE 8000 5001
+# Copy Caddyfile
+COPY Caddyfile /app/Caddyfile
+
+# Expose single port (Caddy proxies both frontend + API)
+EXPOSE 5001
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
@@ -51,19 +57,18 @@ echo "🚀 Starting ClawController..."\n\
 # Start backend\n\
 cd /app/backend\n\
 source venv/bin/activate\n\
-python -m uvicorn main:app --host 0.0.0.0 --port ${BACKEND_PORT} &\n\
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 &\n\
 BACKEND_PID=$!\n\
 echo "Backend started (PID: $BACKEND_PID)"\n\
 \n\
-# Serve frontend static files with Python\n\
-cd /app/frontend/dist\n\
-python -m http.server ${FRONTEND_PORT} &\n\
-FRONTEND_PID=$!\n\
-echo "Frontend started (PID: $FRONTEND_PID)"\n\
+# Start Caddy (reverse proxy + static files on port 5001)\n\
+cd /app\n\
+caddy run --config /app/Caddyfile &\n\
+CADDY_PID=$!\n\
+echo "Caddy started (PID: $CADDY_PID)"\n\
 \n\
 echo ""\n\
-echo "Dashboard: http://localhost:${FRONTEND_PORT}"\n\
-echo "API: http://localhost:${BACKEND_PORT}"\n\
+echo "Dashboard: http://localhost:5001"\n\
 echo ""\n\
 \n\
 # Wait for any process to exit\n\

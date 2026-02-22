@@ -1,7 +1,6 @@
 // API utility for ClawController
 // Dynamically determine API URL based on current host
-const currentHost = window.location.hostname
-const API_BASE = `http://${currentHost}:8000`
+const API_BASE = window.location.origin
 
 export const getStoredApiKey = () => localStorage.getItem('CLAW_API_KEY')
 export const setStoredApiKey = (key) => localStorage.setItem('CLAW_API_KEY', key)
@@ -9,7 +8,8 @@ export const clearStoredApiKey = () => localStorage.removeItem('CLAW_API_KEY')
 
 const getWSUrl = () => {
   const key = getStoredApiKey() || 'claw-default-key'
-  return `ws://${currentHost}:8000/ws?api_key=${key}`
+  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${wsProto}//${window.location.host}/ws?api_key=${key}`
 }
 
 // Generic fetch wrapper with error handling
