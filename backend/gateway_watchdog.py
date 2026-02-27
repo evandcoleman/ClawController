@@ -227,8 +227,8 @@ Gateway is now healthy and operational."""
     
     async def log_activity(self, activity_type: str, description: str):
         """Log watchdog activity to database."""
+        db = SessionLocal()
         try:
-            db = SessionLocal()
             activity = ActivityLog(
                 activity_type=activity_type,
                 agent_id="gateway_watchdog",
@@ -236,9 +236,10 @@ Gateway is now healthy and operational."""
             )
             db.add(activity)
             db.commit()
-            db.close()
         except Exception as e:
             logging.error(f"Failed to log activity: {e}")
+        finally:
+            db.close()
     
     def should_notify_crash(self) -> bool:
         """Check if we should send a crash notification (respects cooldown)."""
