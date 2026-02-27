@@ -199,6 +199,7 @@ export const useMissionStore = create((set, get) => ({
   // WebSocket
   wsConnected: false,
   ws: null,
+  wsReconnectAttempts: 0,
   
   // UI state
   selectedTaskId: null,
@@ -358,17 +359,20 @@ export const useMissionStore = create((set, get) => ({
         }
       },
       // onOpen
-      () => set({ wsConnected: true }),
+      () => set({ wsConnected: true, wsReconnectAttempts: 0 }),
       // onClose
       () => {
+        const attempts = get().wsReconnectAttempts
         set({ wsConnected: false })
-        // Attempt to reconnect after 3 seconds
+        if (attempts >= 10) return // stop after 10 attempts
+        const delay = Math.min(1000 * Math.pow(2, attempts), 30000)
         setTimeout(() => {
           const state = get()
           if (!state.wsConnected) {
+            set({ wsReconnectAttempts: attempts + 1 })
             state.connectWebSocket()
           }
-        }, 3000)
+        }, delay)
       },
       // onError
       (error) => console.error('WebSocket error:', error)
@@ -381,7 +385,7 @@ export const useMissionStore = create((set, get) => ({
     const { ws } = get()
     if (ws) {
       ws.close()
-      set({ ws: null, wsConnected: false })
+      set({ ws: null, wsConnected: false, wsReconnectAttempts: 0 })
     }
   },
   
