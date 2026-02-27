@@ -36,6 +36,13 @@ from models import (
 from stuck_task_monitor import run_stuck_task_check, get_monitor_status
 from gateway_watchdog import start_gateway_watchdog, stop_gateway_watchdog, get_watchdog_status, run_health_check, manual_restart
 from openclaw_paths import get_config_path, get_openclaw_dir, get_agent_sessions_dir, get_agent_dir, get_default_workspace, is_within_openclaw, is_within_allowed
+from gateway_config import GatewayConfig
+from gateway_client import create_gateway_client, GatewayClient
+from remote_gateway import NotAvailableInRemoteMode
+
+# ── Gateway client (global, initialised at startup) ──
+_gateway_config = GatewayConfig.from_env()
+gateway = create_gateway_client(_gateway_config)
 
 app = FastAPI(title="ClawController API", version="2.0.0")
 
@@ -70,6 +77,14 @@ app.add_middleware(
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}
+
+@app.get("/api/gateway/mode")
+def get_gateway_mode():
+    """Return the current gateway connection mode."""
+    result = {"mode": _gateway_config.mode}
+    if _gateway_config.mode == "remote":
+        result["gateway_url"] = _gateway_config.gateway_url
+    return result
 
 # WebSocket connections
 class ConnectionManager:
@@ -239,7 +254,7 @@ def validate_agent_id_for_cli(agent_id: str) -> str:
 def notify_task_completed(task, completed_by: str = None):
     """Notify main agent when a task is marked DONE."""
     agent_name = completed_by or task.assignee_id or "Unknown"
-    
+
     message = f"""✅ Task completed: {task.title}
 
 **Completed by:** {agent_name}
@@ -248,16 +263,8 @@ def notify_task_completed(task, completed_by: str = None):
 
 View in ClawController: http://localhost:5001"""
 
-    try:
-        subprocess.Popen(
-            ["openclaw", "agent", "--agent", "main", "--message", message],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(Path.home())
-        )
-        logger.info("Notified main agent of task completion: %s", task.title)
-    except Exception as e:
-        logger.error("Failed to notify main agent of completion: %s", e)
+    gateway.messenger.send_message("main", message)
+    logger.info("Notified main agent of task completion: %s", task.title)
 
 # Helper to notify reviewer when task needs review
 def notify_reviewer(task, submitted_by: str = None):
@@ -295,16 +302,8 @@ def notify_reviewer(task, submitted_by: str = None):
 
 View in ClawController: http://localhost:5001/tasks/{task.id}"""
 
-    try:
-        subprocess.Popen(
-            ["openclaw", "agent", "--agent", reviewer_id, "--message", message],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(Path.home())
-        )
-        logger.info("Notified reviewer %s of task needing review: %s", reviewer_id, task.title)
-    except Exception as e:
-        logger.error("Failed to notify reviewer %s: %s", reviewer_id, e)
+    gateway.messenger.send_message(reviewer_id, message)
+    logger.info("Notified reviewer %s of task needing review: %s", reviewer_id, task.title)
 
 # Helper to notify agent when their task is rejected
 def notify_task_rejected(task, feedback: str = None, rejected_by: str = None):
@@ -331,16 +330,8 @@ curl -X POST http://localhost:8000/api/tasks/{task.id}/activity -H "Content-Type
 
 View in ClawController: http://localhost:5001"""
 
-    try:
-        subprocess.Popen(
-            ["openclaw", "agent", "--agent", task.assignee_id, "--message", message],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(Path.home())
-        )
-        logger.info("Notified agent %s of task rejection: %s", task.assignee_id, task.title)
-    except Exception as e:
-        logger.error("Failed to notify agent %s of rejection: %s", task.assignee_id, e)
+    gateway.messenger.send_message(task.assignee_id, message)
+    logger.info("Notified agent %s of task rejection: %s", task.assignee_id, task.title)
 
 # Helper to notify agent when task is assigned
 def notify_agent_of_task(task):
@@ -369,52 +360,42 @@ curl -X POST http://localhost:8000/api/tasks/{task.id}/activity -H "Content-Type
 ## When Complete
 Post an activity with 'completed' or 'done' in the message - the system will auto-transition to REVIEW."""
 
-    try:
-        subprocess.Popen(
-            ["openclaw", "agent", "--agent", task.assignee_id, "--message", message],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(Path.home())
-        )
-        logger.info("Notified agent %s of task: %s", task.assignee_id, task.title)
-    except Exception as e:
-        logger.error("Failed to notify agent %s: %s", task.assignee_id, e)
+    gateway.messenger.send_message(task.assignee_id, message)
+    logger.info("Notified agent %s of task: %s", task.assignee_id, task.title)
 
 # Startup
 @app.on_event("startup")
 async def startup():
     init_db()
-    logger.info("ClawController API started")
+    logger.info("ClawController API started (gateway mode: %s)", _gateway_config.mode)
+    if _gateway_config.mode == "remote":
+        logger.info("Remote gateway URL: %s", _gateway_config.gateway_url)
     # Start background monitors
     asyncio.create_task(openclaw_session_monitor())
-    asyncio.create_task(start_gateway_watchdog())
+    asyncio.create_task(start_gateway_watchdog(gateway.controller, gateway.messenger))
 
 async def openclaw_session_monitor():
     """Background task that monitors OpenClaw sessions to detect agent activity.
-    
-    When an agent session is active and has an ASSIGNED task, 
+
+    When an agent session is active and has an ASSIGNED task,
     auto-transitions to IN_PROGRESS.
+
+    In remote mode, session listing returns empty so this loop is harmless.
     """
     logger.info("OpenClaw session monitor started")
-    
+
     while True:
         try:
             await asyncio.sleep(10)  # Check every 10 seconds
-            
+
             # Get active sessions from OpenClaw
-            result = subprocess.run(
-                ["openclaw", "sessions", "list", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            if result.returncode != 0:
+            try:
+                sessions_data = gateway.sessions.list_sessions()
+            except Exception:
                 continue
-                
-            sessions_data = json.loads(result.stdout)
+
             active_agents = set()
-            
+
             # Extract agent IDs from active sessions
             for session in sessions_data.get("sessions", []):
                 key = session.get("key", "")
@@ -427,10 +408,10 @@ async def openclaw_session_monitor():
                         updated_at = session.get("updatedAt", 0)
                         if time.time() * 1000 - updated_at < 60000:
                             active_agents.add(agent_id)
-            
+
             if not active_agents:
                 continue
-            
+
             # Check for ASSIGNED tasks that should transition to IN_PROGRESS
             db = SessionLocal()
             try:
@@ -438,7 +419,7 @@ async def openclaw_session_monitor():
                     Task.status == TaskStatus.ASSIGNED,
                     Task.assignee_id.in_(active_agents)
                 ).all()
-                
+
                 for task in assigned_tasks:
                     task.status = TaskStatus.IN_PROGRESS
                     # Log the auto-transition
@@ -449,18 +430,16 @@ async def openclaw_session_monitor():
                     )
                     db.add(activity)
                     logger.info("Session monitor: Task '%s' → IN_PROGRESS (agent %s active)", task.title, task.assignee_id)
-                
+
                 if assigned_tasks:
                     db.commit()
                     # Broadcast update
                     await manager.broadcast({"type": "tasks_updated", "data": {}})
             finally:
                 db.close()
-                
+
         except json.JSONDecodeError:
             pass  # OpenClaw output wasn't valid JSON
-        except subprocess.TimeoutExpired:
-            pass  # OpenClaw command timed out
         except Exception as e:
             logger.error("Session monitor error: %s", e)
 
@@ -508,49 +487,8 @@ async def update_agent_status(agent_id: str, status: str, db: Session = Depends(
 # ============ OpenClaw Integration ============
 
 def get_agent_status_from_sessions(agent_id: str) -> str:
-    """Determine agent status from session file activity."""
-    # Security: validate agent ID
-    if not re.match(r"^[a-zA-Z0-9_-]+$", agent_id):
-        return "OFFLINE"
-
-    sessions_dir = get_agent_sessions_dir(agent_id)
-
-    # Security: ensure sessions_dir is within .openclaw
-    if not is_within_openclaw(sessions_dir):
-        return "OFFLINE"
-
-    if not sessions_dir.exists():
-        return "STANDBY"  # Configured but never activated - ready to go
-    
-    # Find the most recently modified session file
-    session_files = list(sessions_dir.glob("*.jsonl"))
-    if not session_files:
-        return "STANDBY"  # Configured but no sessions yet - ready to go
-    
-    # Get the most recent modification time
-    latest_mtime = 0
-    for f in session_files:
-        try:
-            mtime = f.stat().st_mtime
-            if mtime > latest_mtime:
-                latest_mtime = mtime
-        except Exception:
-            continue
-    
-    if latest_mtime == 0:
-        return "STANDBY"
-    
-    # Calculate time since last activity
-    now = time.time()
-    elapsed_seconds = now - latest_mtime
-    
-    # Status thresholds
-    if elapsed_seconds < 300:  # 5 minutes
-        return "WORKING"
-    elif elapsed_seconds < 1800:  # 30 minutes
-        return "IDLE"
-    else:
-        return "STANDBY"  # Has sessions but inactive - ready to be activated
+    """Determine agent status from session file activity (delegates to gateway)."""
+    return gateway.status.get_agent_status(agent_id)
 
 class OpenClawAgentModelResponse(BaseModel):
     primary: Optional[str] = None
@@ -569,14 +507,13 @@ class OpenClawAgentResponse(BaseModel):
 @app.get("/api/openclaw/agents", response_model=List[OpenClawAgentResponse])
 def get_openclaw_agents(db: Session = Depends(get_db)):
     """Get agents from OpenClaw config with real-time status from session activity."""
-    config_path = get_config_path()
-    
-    if not config_path.exists():
+    if not gateway.config_manager.config_exists():
         raise HTTPException(status_code=404, detail="OpenClaw config not found")
-    
+
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        config = gateway.config_manager.get_config()
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=404, detail="OpenClaw config not available in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse OpenClaw config: {str(e)}")
     
@@ -649,11 +586,17 @@ def get_openclaw_agents(db: Session = Depends(get_db)):
 @app.get("/api/openclaw/status")
 def get_openclaw_status():
     """Check if OpenClaw integration is available."""
+    if _gateway_config.mode == "remote":
+        return {
+            "available": True,
+            "mode": "remote",
+            "gateway_url": _gateway_config.gateway_url,
+        }
     config_path = get_config_path()
-
     return {
         "available": config_path.exists(),
-        "config_path": str(config_path)
+        "mode": "local",
+        "config_path": str(config_path),
     }
 
 class ImportAgentsRequest(BaseModel):
@@ -662,17 +605,16 @@ class ImportAgentsRequest(BaseModel):
 @app.post("/api/openclaw/import")
 async def import_agents_from_openclaw(import_request: ImportAgentsRequest, db: Session = Depends(get_db)):
     """Import selected agents from OpenClaw config into ClawController database."""
-    config_path = get_config_path()
-    
-    if not config_path.exists():
+    if not gateway.config_manager.config_exists():
         raise HTTPException(status_code=404, detail="OpenClaw config not found")
-    
+
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        config = gateway.config_manager.get_config()
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=404, detail="OpenClaw config not available in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse OpenClaw config: {str(e)}")
-    
+
     agents_config = config.get("agents", {})
     agent_list = agents_config.get("list", [])
     
@@ -1200,22 +1142,16 @@ def parse_mentions(content: str) -> list[str]:
 
 def get_agent_id_by_name(name: str, db: Session) -> str | None:
     """Find agent ID by name (case-insensitive)."""
-    config_path = get_config_path()
-    
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-            agents_list = config.get("agents", {}).get("list", [])
-            for agent in agents_list:
-                agent_id = agent.get("id", "")
-                identity = agent.get("identity", {})
-                agent_name = identity.get("name") or agent.get("name") or agent_id
-                # Match by ID or name (case-insensitive)
-                if agent_id.lower() == name.lower() or agent_name.lower() == name.lower():
-                    return agent_id
-        except Exception:
-            pass
+    try:
+        agents_list = gateway.config_manager.get_agent_list()
+        for agent in agents_list:
+            agent_id = agent.get("id", "")
+            identity = agent.get("identity", {})
+            agent_name = identity.get("name") or agent.get("name") or agent_id
+            if agent_id.lower() == name.lower() or agent_name.lower() == name.lower():
+                return agent_id
+    except Exception:
+        pass
     return None
 
 async def route_mention_to_agent(agent_id: str, task: Task, comment_content: str, commenter_name: str):
@@ -1240,17 +1176,7 @@ curl -X POST http://localhost:8000/api/tasks/{task.id}/comments -H "Content-Type
 ```"""
 
     try:
-        # Use subprocess to call OpenClaw CLI
-        subprocess.Popen(
-            [
-                "openclaw", "agent",
-                "--agent", agent_id,
-                "--message", message
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(Path.home())
-        )
+        gateway.messenger.send_message(agent_id, message)
         logger.info("Routed mention to agent %s", agent_id)
     except Exception as e:
         # Log error but don't fail the comment creation
@@ -1570,8 +1496,6 @@ async def send_chat_message(message_data: ChatMessageCreate, db: Session = Depen
 
 
 # ============ OpenClaw Agent Chat ============
-import subprocess
-import re
 
 class SendToAgentRequest(BaseModel):
     agent_id: str
@@ -1579,30 +1503,25 @@ class SendToAgentRequest(BaseModel):
 
 def get_agent_info(agent_id: str, db: Session) -> dict:
     """Get agent info from OpenClaw config or fallback."""
-    config_path = get_config_path()
-    
     # First try OpenClaw config
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-            agents_list = config.get("agents", {}).get("list", [])
-            for agent in agents_list:
-                if agent.get("id") == agent_id:
-                    identity = agent.get("identity", {})
-                    return {
-                        "id": agent_id,
-                        "name": identity.get("name") or agent.get("name") or agent_id,
-                        "avatar": identity.get("emoji") or "🤖"
-                    }
-        except Exception:
-            pass
+    try:
+        agents_list = gateway.config_manager.get_agent_list()
+        for agent in agents_list:
+            if agent.get("id") == agent_id:
+                identity = agent.get("identity", {})
+                return {
+                    "id": agent_id,
+                    "name": identity.get("name") or agent.get("name") or agent_id,
+                    "avatar": identity.get("emoji") or "🤖"
+                }
+    except Exception:
+        pass
 
     # Fallback to database
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if agent:
         return {"id": agent.id, "name": agent.name, "avatar": agent.avatar}
-    
+
     # Ultimate fallback
     return {"id": agent_id, "name": agent_id.title(), "avatar": "🤖"}
 
@@ -1636,45 +1555,26 @@ async def send_to_agent(data: SendToAgentRequest, db: Session = Depends(get_db))
         }
     })
     
-    # Call OpenClaw CLI to send message to agent
+    # Send message to agent and wait for response
     try:
-        result = subprocess.run(
-            [
-                "openclaw", "agent",
-                "--agent", agent_id,
-                "--message", message,
-                "--json"
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,  # 2 minute timeout for agent response
-            cwd=str(Path.home())
-        )
-        
-        if result.returncode == 0:
-            # Parse JSON response from OpenClaw
-            try:
-                response_data = json.loads(result.stdout)
-                # OpenClaw returns: { result: { payloads: [{ text: "..." }] } }
-                payloads = response_data.get("result", {}).get("payloads", [])
-                if payloads:
-                    # Combine all text payloads
-                    texts = [p.get("text", "") for p in payloads if p.get("text")]
-                    agent_response = "\n".join(texts) if texts else "(No text in response)"
-                else:
-                    # Fallback to other fields
-                    agent_response = response_data.get("response", "") or response_data.get("content", "") or "(No response)"
-            except json.JSONDecodeError:
-                # If not JSON, use raw output
-                agent_response = result.stdout.strip()
-            
-            if not agent_response:
-                agent_response = "(No response from agent)"
+        response_data = gateway.messenger.send_message_sync(agent_id, message, timeout=120)
+
+        if "error" in response_data:
+            agent_response = f"⚠️ Agent error: {response_data['error']}"
+        elif "raw" in response_data:
+            agent_response = response_data["raw"]
         else:
-            # Handle error
-            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-            agent_response = f"⚠️ Agent error: {error_msg}"
-    
+            # OpenClaw returns: { result: { payloads: [{ text: "..." }] } }
+            payloads = response_data.get("result", {}).get("payloads", [])
+            if payloads:
+                texts = [p.get("text", "") for p in payloads if p.get("text")]
+                agent_response = "\n".join(texts) if texts else "(No text in response)"
+            else:
+                agent_response = response_data.get("response", "") or response_data.get("content", "") or "(No response)"
+
+        if not agent_response:
+            agent_response = "(No response from agent)"
+
     except subprocess.TimeoutExpired:
         agent_response = "⚠️ Agent response timed out (120s limit)"
     except FileNotFoundError:
@@ -1850,27 +1750,12 @@ curl -X PATCH http://localhost:8000/api/tasks/{task_id} \\
     
     # Spawn isolated session for this task
     try:
-        result = subprocess.run(
-            [
-                "openclaw", "sessions", "spawn",
-                "--agent", task.assignee_id,
-                "--label", f"task-{task_id[:8]}",
-                "--message", task_message
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
+        gateway.sessions.spawn_session(
+            agent_id=task.assignee_id,
+            label=f"task-{task_id[:8]}",
+            message=task_message,
         )
-        
-        if result.returncode != 0:
-            # Fallback to direct agent command
-            result = subprocess.run(
-                ["openclaw", "agent", "--agent", task.assignee_id, "--message", task_message],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-        
+
         return {
             "ok": True,
             "task_id": task_id,
@@ -1878,7 +1763,7 @@ curl -X PATCH http://localhost:8000/api/tasks/{task_id} \\
             "session_label": f"task-{task_id[:8]}",
             "message": "Task routed with fresh context"
         }
-        
+
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Agent spawn timed out")
     except Exception as e:
@@ -2232,58 +2117,33 @@ async def trigger_recurring_task(recurring_id: str, db: Session = Depends(get_db
 def get_models():
     """Return list of available models from OpenClaw API."""
     try:
-        # Call OpenClaw models list API directly (--all to get full catalog)
-        result = subprocess.run(
-            ["openclaw", "models", "list", "--all", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(Path.home())
-        )
-        
-        if result.returncode != 0:
-            logger.warning("OpenClaw models command failed: %s", result.stderr)
-            raise Exception(f"Command failed with code {result.returncode}")
-        
-        # Parse OpenClaw JSON response
-        openclaw_data = json.loads(result.stdout)
-        models = openclaw_data.get("models", [])
-        
+        models = gateway.models.list_models()
+
+        if not models:
+            return get_fallback_models()
+
         available_models = []
         for model in models:
-            # Only include available models
             if not model.get("available", False) and "configured" not in model.get("tags", []):
                 continue
-                
+
             model_id = model.get("key")
             model_name = model.get("name", model_id)
-            
             if not model_id:
                 continue
-            
-            # Generate alias from model ID
+
             alias = generate_model_alias(model_id, model_name)
-            
-            # Generate description based on model characteristics
             description = generate_model_description(model_id, model_name, model)
-            
-            available_models.append({
-                "id": model_id,
-                "alias": alias,
-                "description": description
-            })
-        
+            available_models.append({"id": model_id, "alias": alias, "description": description})
+
         if available_models:
             logger.info("Fetched %d models from OpenClaw API", len(available_models))
             return available_models
-        else:
-            logger.warning("No available models found in OpenClaw, using fallback")
-            return get_fallback_models()
-        
-    except subprocess.TimeoutExpired:
-        logger.warning("OpenClaw models command timed out")
+
+        logger.warning("No available models found in OpenClaw, using fallback")
         return get_fallback_models()
-    except (subprocess.CalledProcessError, json.JSONDecodeError, Exception) as e:
+
+    except Exception as e:
         logger.error("Failed to fetch models from OpenClaw: %s", e)
         return get_fallback_models()
 
@@ -2376,19 +2236,14 @@ class GeneratedAgentConfig(BaseModel):
 @app.post("/api/agents/generate", response_model=GeneratedAgentConfig)
 def generate_agent_config(request: GenerateAgentRequest):
     """Generate agent config by routing to main agent (if available)."""
-    config_path = get_config_path()
-    
     # Check if main agent exists
     main_agent_exists = False
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-            agents_list = config.get("agents", {}).get("list", [])
-            main_agent_exists = any(a.get("id") == "main" for a in agents_list)
-        except Exception:
-            pass
-    
+    try:
+        agents_list = gateway.config_manager.get_agent_list()
+        main_agent_exists = any(a.get("id") == "main" for a in agents_list)
+    except Exception:
+        pass
+
     if main_agent_exists:
         # Route to main agent for generation
         prompt = f"""Generate a configuration for a new AI agent based on this description:
@@ -2410,25 +2265,26 @@ Make the TOOLS.md list relevant tools and integrations for this type of agent.
 Choose an appropriate model: opus for complex reasoning, sonnet for general tasks, haiku for simple/fast tasks, codex for coding."""
 
         try:
-            result = subprocess.run(
-                ["openclaw", "agent", "--agent", "main", "--message", prompt],
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                # Try to parse JSON from response
-                response_text = result.stdout.strip()
-                
-                # Find JSON in response (might have extra text)
+            response_data = gateway.messenger.send_message_sync("main", prompt, timeout=60)
+
+            # Extract text from response
+            response_text = ""
+            if "raw" in response_data:
+                response_text = response_data["raw"]
+            elif "error" not in response_data:
+                payloads = response_data.get("result", {}).get("payloads", [])
+                if payloads:
+                    texts = [p.get("text", "") for p in payloads if p.get("text")]
+                    response_text = "\n".join(texts)
+
+            if response_text:
                 json_start = response_text.find('{')
                 json_end = response_text.rfind('}') + 1
-                
+
                 if json_start >= 0 and json_end > json_start:
                     json_str = response_text[json_start:json_end]
                     config_data = json.loads(json_str)
-                    
+
                     return GeneratedAgentConfig(
                         id=config_data.get("id", "new-agent"),
                         name=config_data.get("name", "New Agent"),
@@ -2506,74 +2362,61 @@ def create_agent(request: CreateAgentRequest):
     if not re.match(r"^[a-zA-Z0-9_-]+$", request.id):
         raise HTTPException(status_code=400, detail="Invalid agent ID. Only alphanumeric, underscores, and hyphens allowed.")
 
-    config_path = get_config_path()
-
-    # Use new standard paths
-    agent_dir = get_agent_dir(request.id)
-
-    # Security: ensure agent_dir is within .openclaw
-    if not is_within_openclaw(agent_dir):
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    workspace_path = agent_dir / "workspace"
-    agent_config_dir = agent_dir / "agent"
-    
-    # Read existing config
-    if not config_path.exists():
+    if not gateway.config_manager.config_exists():
         raise HTTPException(status_code=404, detail="OpenClaw config not found")
-    
+
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        config = gateway.config_manager.get_config()
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Agent creation via config is not available in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read config: {str(e)}")
-    
+
     # Check if agent ID already exists
     agents_config = config.get("agents", {"list": []})
     agent_list = agents_config.get("list", [])
-    
+
     if any(a.get("id") == request.id for a in agent_list):
         raise HTTPException(status_code=400, detail=f"Agent with id '{request.id}' already exists")
-    
-    # Create workspace and agent directories
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    agent_config_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Write agent configuration files to agent directory
-    (agent_config_dir / "SOUL.md").write_text(request.soul)
-    (agent_config_dir / "TOOLS.md").write_text(request.tools)
-    (agent_config_dir / "AGENTS.md").write_text(request.agentsMd)
-    
-    # Create new agent config entry
+
+    # Build new agent entry
     new_agent = {
         "id": request.id,
         "name": request.name,
-        "workspace": str(workspace_path),
-        "agentDir": str(agent_config_dir),
         "model": {"primary": request.model},
-        "identity": {"name": request.name, "emoji": request.emoji}
+        "identity": {"name": request.name, "emoji": request.emoji},
     }
-    
-    # Add discord channel if provided
     if request.discordChannelId:
         new_agent["discord"] = {"channelId": request.discordChannelId}
-    
-    # Add to config
+
+    # Create workspace and write agent files
+    try:
+        new_agent = gateway.config_manager.create_agent_workspace(
+            agent_id=request.id,
+            agent_entry=new_agent,
+            soul=request.soul,
+            tools=request.tools,
+            agents_md=request.agentsMd,
+        )
+    except (NotAvailableInRemoteMode, PermissionError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Add to config and write
     agent_list.append(new_agent)
     agents_config["list"] = agent_list
     config["agents"] = agents_config
-    
-    # Write updated config
+
     try:
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
+        gateway.config_manager.write_config(config)
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Cannot write config in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {str(e)}")
-    
+
     return {
         "ok": True,
         "agent": new_agent,
-        "workspace": str(workspace_path)
+        "workspace": new_agent.get("workspace", ""),
     }
 
 
@@ -2585,59 +2428,17 @@ class AgentFilesResponse(BaseModel):
 @app.get("/api/agents/{agent_id}/files", response_model=AgentFilesResponse)
 def get_agent_files(agent_id: str):
     """Get agent workspace files (SOUL.md, AGENTS.md, TOOLS.md)."""
-    config_path = get_config_path()
-    
-    # Read config to get workspace path
-    if not config_path.exists():
-        raise HTTPException(status_code=404, detail="OpenClaw config not found")
-    
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        files = gateway.config_manager.get_agent_files(agent_id)
+        return AgentFilesResponse(soul=files["soul"], tools=files["tools"], agentsMd=files["agentsMd"])
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Agent files are not available in remote mode")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read config: {str(e)}")
-    
-    # Find agent
-    agent_list = config.get("agents", {}).get("list", [])
-    agent = next((a for a in agent_list if a.get("id") == agent_id), None)
-    
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    
-    # Get agent directory (where config files are stored)
-    agent_dir_raw = agent.get("agentDir", str(get_default_workspace(agent_id)))
-    agent_dir = Path(agent_dir_raw).resolve()
-
-    # Security: ensure agent_dir is within allowed locations
-    if not is_within_allowed(agent_dir):
-        raise HTTPException(status_code=403, detail="Access denied to agent directory")
-
-    # Fallback to old workspace structure if agentDir not specified
-    if not agent_dir.exists():
-        workspace_raw = agent.get("workspace", str(get_default_workspace(agent_id)))
-        workspace = Path(workspace_raw).resolve()
-        if not is_within_allowed(workspace):
-            raise HTTPException(status_code=403, detail="Access denied to workspace directory")
-        agent_dir = workspace
-
-    # Read files (with defaults if missing)
-    soul = ""
-    tools = ""
-    agents_md = ""
-
-    soul_path = agent_dir / "SOUL.md"
-    if soul_path.exists():
-        soul = soul_path.read_text()
-
-    tools_path = agent_dir / "TOOLS.md"
-    if tools_path.exists():
-        tools = tools_path.read_text()
-
-    agents_path = agent_dir / "AGENTS.md"
-    if agents_path.exists():
-        agents_md = agents_path.read_text()
-
-    return AgentFilesResponse(soul=soul, tools=tools, agentsMd=agents_md)
+        raise HTTPException(status_code=500, detail=f"Failed to read agent files: {str(e)}")
 
 
 class UpdateAgentFilesRequest(BaseModel):
@@ -2648,55 +2449,19 @@ class UpdateAgentFilesRequest(BaseModel):
 @app.put("/api/agents/{agent_id}/files")
 def update_agent_files(agent_id: str, request: UpdateAgentFilesRequest):
     """Update agent workspace files."""
-    config_path = get_config_path()
-    
-    # Read config to get workspace path
-    if not config_path.exists():
-        raise HTTPException(status_code=404, detail="OpenClaw config not found")
-    
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        gateway.config_manager.write_agent_files(
+            agent_id, soul=request.soul, tools=request.tools, agents_md=request.agentsMd
+        )
+        return {"ok": True}
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Agent file editing is not available in remote mode")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read config: {str(e)}")
-    
-    # Find agent
-    agent_list = config.get("agents", {}).get("list", [])
-    agent = next((a for a in agent_list if a.get("id") == agent_id), None)
-    
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    
-    # Get agent directory (where config files are stored)
-    agent_dir_raw = agent.get("agentDir", str(get_default_workspace(agent_id)))
-    agent_dir = Path(agent_dir_raw).resolve()
-
-    # Security: ensure agent_dir is within allowed locations
-    if not is_within_allowed(agent_dir):
-        raise HTTPException(status_code=403, detail="Access denied to agent directory")
-
-    # Fallback to old workspace structure if agentDir not specified
-    if not agent_dir.exists():
-        workspace_raw = agent.get("workspace", str(get_default_workspace(agent_id)))
-        workspace = Path(workspace_raw).resolve()
-        if not is_within_allowed(workspace):
-            raise HTTPException(status_code=403, detail="Access denied to workspace directory")
-        agent_dir = workspace
-    
-    if not agent_dir.exists():
-        agent_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Update files
-    if request.soul is not None:
-        (agent_dir / "SOUL.md").write_text(request.soul)
-    
-    if request.tools is not None:
-        (agent_dir / "TOOLS.md").write_text(request.tools)
-    
-    if request.agentsMd is not None:
-        (agent_dir / "AGENTS.md").write_text(request.agentsMd)
-    
-    return {"ok": True}
+        raise HTTPException(status_code=500, detail=f"Failed to update agent files: {str(e)}")
 
 
 class UpdateAgentConfigRequest(BaseModel):
@@ -2726,86 +2491,76 @@ class UpdateAgentModelsRequest(BaseModel):
 @app.patch("/api/agents/{agent_id}")
 def update_agent_config(agent_id: str, request: UpdateAgentConfigRequest):
     """Update agent config (model, identity) in openclaw.json."""
-    config_path = get_config_path()
-    
-    if not config_path.exists():
-        raise HTTPException(status_code=404, detail="OpenClaw config not found")
-    
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        config = gateway.config_manager.get_config()
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Agent config editing is not available in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read config: {str(e)}")
-    
-    # Find and update agent
+
     agent_list = config.get("agents", {}).get("list", [])
     agent_index = next((i for i, a in enumerate(agent_list) if a.get("id") == agent_id), None)
-    
+
     if agent_index is None:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    
+
     agent = agent_list[agent_index]
-    
+
     if request.name is not None:
         agent["name"] = request.name
         if "identity" not in agent:
             agent["identity"] = {}
         agent["identity"]["name"] = request.name
-    
+
     if request.emoji is not None:
         if "identity" not in agent:
             agent["identity"] = {}
         agent["identity"]["emoji"] = request.emoji
-    
+
     if request.model is not None:
         if "model" not in agent:
             agent["model"] = {}
         agent["model"]["primary"] = request.model
-    
+
     agent_list[agent_index] = agent
     config["agents"]["list"] = agent_list
-    
-    # Write updated config
+
     try:
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
+        gateway.config_manager.write_config(config)
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Cannot write config in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {str(e)}")
-    
+
     return {"ok": True, "agent": agent}
 
 
 @app.delete("/api/agents/{agent_id}")
 def delete_agent(agent_id: str):
     """Remove agent from config (keeps workspace as archive)."""
-    config_path = get_config_path()
-    
-    if not config_path.exists():
-        raise HTTPException(status_code=404, detail="OpenClaw config not found")
-    
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        config = gateway.config_manager.get_config()
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Agent deletion from config is not available in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read config: {str(e)}")
-    
-    # Find and remove agent
+
     agent_list = config.get("agents", {}).get("list", [])
     original_len = len(agent_list)
     agent_list = [a for a in agent_list if a.get("id") != agent_id]
-    
+
     if len(agent_list) == original_len:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    
+
     config["agents"]["list"] = agent_list
-    
-    # Write updated config
+
     try:
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
+        gateway.config_manager.write_config(config)
+    except NotAvailableInRemoteMode:
+        raise HTTPException(status_code=400, detail="Cannot write config in remote mode")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {str(e)}")
-    
+
     return {"ok": True, "message": f"Agent '{agent_id}' removed (workspace preserved)"}
 
 # ============ Agent Model Management ============
@@ -2889,16 +2644,8 @@ The agent will continue using the fallback model until manually restored to prim
 
 View in ClawController: http://localhost:5001"""
 
-        try:
-            subprocess.Popen(
-                ["openclaw", "agent", "--agent", "main", "--message", message],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=str(Path.home())
-            )
-            logger.info("Notified main agent about model fallback for %s", agent.name)
-        except Exception as e:
-            logger.error("Failed to notify about model fallback: %s", e)
+        gateway.messenger.send_message("main", message)
+        logger.info("Notified main agent about model fallback for %s", agent.name)
     
     # Log the failure
     await log_activity(db, "model_failure", agent_id=agent_id,
@@ -2977,7 +2724,7 @@ async def preview_file(path: str):
 async def check_stuck_tasks():
     """Run stuck task detection and return results."""
     try:
-        result = run_stuck_task_check()
+        result = run_stuck_task_check(gateway.messenger)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stuck task check failed: {str(e)}")
@@ -3006,7 +2753,7 @@ async def get_gateway_watchdog_status():
 async def run_gateway_health_check():
     """Run a one-time gateway health check."""
     try:
-        result = await run_health_check()
+        result = await run_health_check(gateway.controller)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
@@ -3015,7 +2762,7 @@ async def run_gateway_health_check():
 async def restart_gateway():
     """Manually restart the OpenClaw gateway."""
     try:
-        result = await manual_restart()
+        result = await manual_restart(gateway.controller, gateway.messenger)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Manual restart failed: {str(e)}")
@@ -3029,7 +2776,7 @@ async def setup_background_monitoring():
         while True:
             try:
                 await asyncio.sleep(30 * 60)  # 30 minutes
-                result = run_stuck_task_check()
+                result = run_stuck_task_check(gateway.messenger)
                 
                 # Only log if there are stuck tasks or notifications sent
                 if result.get("stuck_tasks") or result.get("notifications_sent", 0) > 0:

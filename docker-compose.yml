@@ -8,6 +8,10 @@ services:
     environment:
       - CLAW_API_KEY=${CLAW_API_KEY:-claw-default-key}
       - OPENCLAW_DIR=${OPENCLAW_DIR:-}
+      - OPENCLAW_GATEWAY_URL=${OPENCLAW_GATEWAY_URL:-}
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
+      - OPENCLAW_GATEWAY_TIMEOUT=${OPENCLAW_GATEWAY_TIMEOUT:-30}
+      - OPENCLAW_GATEWAY_TLS_VERIFY=${OPENCLAW_GATEWAY_TLS_VERIFY:-true}
     restart: unless-stopped
 
 volumes:

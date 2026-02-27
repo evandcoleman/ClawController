@@ -3,10 +3,12 @@ Stuck Task Detection System for ClawController
 
 Monitors tasks for excessive time in same status and alerts when intervention is needed.
 Includes safeguards to prevent notification loops and tracks consecutive detections.
+
+Accepts an optional ``AgentMessenger`` for sending notifications; falls back to
+a no-op if none is provided.
 """
 
 import json
-import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -38,11 +40,12 @@ STATE_FILE = Path(__file__).parent.parent / "data" / "stuck_task_state.json"
 
 class StuckTaskMonitor:
     """Monitor and detect stuck tasks with safeguards against notification loops."""
-    
-    def __init__(self):
+
+    def __init__(self, messenger=None):
         self.state_file = STATE_FILE
         self.state_file.parent.mkdir(exist_ok=True)
         self.state = self._load_state()
+        self._messenger = messenger
         
     def _load_state(self) -> Dict:
         """Load persistent state from file."""
@@ -173,17 +176,20 @@ class StuckTaskMonitor:
     
     def _notify_stuck_task(self, task: Task, stuck_info: Dict) -> bool:
         """Send notification about stuck task to main agent."""
+        if self._messenger is None:
+            logger.warning("No messenger configured; skipping stuck task notification")
+            return False
+
         task_state = self.state["stuck_tasks"].get(task.id, {})
         consecutive_count = task_state.get("consecutive_count", 0) + 1
-        
-        # Build notification message
+
         if consecutive_count == 1:
             urgency = "🟡 Task Stuck Alert"
         else:
             urgency = "🔴 PERSISTENT Stuck Task Alert"
-        
+
         assignee_info = f"\n**Assignee:** {stuck_info['assignee_name']} ({stuck_info['assignee_id']})" if stuck_info['assignee_id'] else "\n**Assignee:** Unassigned"
-        
+
         message = f"""{urgency}
 
 **Task:** {stuck_info['title']}
@@ -196,19 +202,14 @@ class StuckTaskMonitor:
 
 **Possible actions:**
 - Check if agent is available and responsive
-- Reassign task to another agent  
+- Reassign task to another agent
 - Update task status or priority
 - Add clarifying comments or instructions
 
 View in ClawController: http://localhost:5001"""
-        
+
         try:
-            subprocess.Popen(
-                ["openclaw", "agent", "--agent", "main", "--message", message],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=str(Path.home())
-            )
+            self._messenger.send_message("main", message)
             logger.info(f"Notified main agent about stuck task: {stuck_info['title']}")
             return True
         except Exception as e:
@@ -282,9 +283,9 @@ View in ClawController: http://localhost:5001"""
         }
 
 # Convenience functions for API integration
-def run_stuck_task_check() -> Dict:
+def run_stuck_task_check(messenger=None) -> Dict:
     """Run a stuck task check and return results."""
-    monitor = StuckTaskMonitor()
+    monitor = StuckTaskMonitor(messenger=messenger)
     return monitor.check_stuck_tasks()
 
 def get_monitor_status() -> Dict:
