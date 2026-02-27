@@ -157,18 +157,25 @@ curl -X POST http://localhost:8000/api/agents \
 ```
 ClawController/
 ├── backend/
-│   ├── main.py          # FastAPI application + all endpoints
-│   ├── models.py        # SQLAlchemy models (Task, Agent, etc.)
-│   ├── database.py      # Database connection setup
-│   └── requirements.txt # Python dependencies
+│   ├── main.py              # FastAPI application + all endpoints
+│   ├── models.py            # SQLAlchemy models (Task, Agent, etc.)
+│   ├── database.py          # Database connection setup
+│   ├── gateway_config.py    # Gateway mode configuration (local/remote)
+│   ├── gateway_client.py    # Protocol definitions + factory
+│   ├── local_gateway.py     # Local mode: subprocess + filesystem
+│   ├── remote_gateway.py    # Remote mode: HTTP via httpx
+│   ├── gateway_watchdog.py  # Gateway health monitoring + auto-restart
+│   ├── stuck_task_monitor.py # Stuck task detection + alerts
+│   ├── openclaw_paths.py    # Path resolution for ~/.openclaw
+│   └── requirements.txt     # Python dependencies
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx      # Main React component
-│   │   ├── components/  # UI components (Header, Kanban, etc.)
-│   │   └── store/       # Zustand state management
-│   └── package.json     # Node dependencies
-├── start.sh             # Start both services
-└── stop.sh              # Stop both services
+│   │   ├── App.jsx          # Main React component
+│   │   ├── components/      # UI components (Header, Kanban, etc.)
+│   │   └── store/           # Zustand state management
+│   └── package.json         # Node dependencies
+├── start.sh                 # Start both services
+└── stop.sh                  # Stop both services
 ```
 
 ### Tech Stack
@@ -186,12 +193,50 @@ ClawController/
 Create a `.env` file in the backend directory (optional):
 
 ```env
+# API authentication key (default: claw-default-key)
+CLAW_API_KEY=your-secret-key
+
 # Database path (default: ./data/mission_control.db)
 DATABASE_URL=sqlite:///./data/mission_control.db
 
-# OpenClaw config path for live agent status
-OPENCLAW_CONFIG_PATH=~/.openclaw/config.yaml
+# OpenClaw directory for local mode (default: ~/.openclaw)
+OPENCLAW_DIR=~/.openclaw
 ```
+
+### Remote Gateway Mode
+
+ClawController can run on a **separate machine** from the OpenClaw gateway. Set these environment variables to enable remote mode:
+
+```env
+# If set, enables remote mode (HTTP calls instead of subprocess/filesystem)
+OPENCLAW_GATEWAY_URL=https://gateway.example.com:18789
+
+# Bearer token for gateway authentication
+OPENCLAW_GATEWAY_TOKEN=your-token
+
+# HTTP request timeout in seconds (default: 30)
+OPENCLAW_GATEWAY_TIMEOUT=30
+
+# Verify TLS certificates (default: true; set false for self-signed certs)
+OPENCLAW_GATEWAY_TLS_VERIFY=true
+```
+
+**Mode auto-detection:** If `OPENCLAW_GATEWAY_URL` is set, ClawController uses remote mode (HTTP API). Otherwise it uses local mode (subprocess + filesystem). Check the current mode at `GET /api/gateway/mode`.
+
+**Feature availability by mode:**
+
+| Feature | Local | Remote |
+|---------|-------|--------|
+| Task management (CRUD, lifecycle) | Yes | Yes |
+| Agent messaging (notifications) | Yes | Yes |
+| Sync agent messaging (chat) | Yes | Yes |
+| Session spawn (task routing) | Yes | Yes |
+| Gateway health monitoring | Yes | Yes (HTTP) |
+| Gateway auto-restart | Yes | No |
+| Session monitoring (auto-transition) | Yes | No (agents update via API) |
+| OpenClaw config management | Yes | No (use ClawController DB) |
+| Agent file editing (SOUL.md etc.) | Yes | No |
+| Model listing | Yes | No (returns fallback list) |
 
 ### Frontend Configuration
 
