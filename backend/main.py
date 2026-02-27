@@ -12,11 +12,20 @@ from datetime import datetime
 from pathlib import Path
 import json
 import asyncio
+import logging
 import os
 import glob
 import time
 import subprocess
 import re
+
+# Configure logging: INFO+ to stdout, WARNING+ to stderr
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("clawcontroller")
 
 from database import init_db, get_db, SessionLocal
 from models import (
@@ -246,9 +255,9 @@ View in ClawController: http://localhost:5001"""
             stderr=subprocess.DEVNULL,
             cwd=str(Path.home())
         )
-        print(f"Notified main agent of task completion: {task.title}")
+        logger.info("Notified main agent of task completion: %s", task.title)
     except Exception as e:
-        print(f"Failed to notify main agent of completion: {e}")
+        logger.error("Failed to notify main agent of completion: %s", e)
 
 # Helper to notify reviewer when task needs review
 def notify_reviewer(task, submitted_by: str = None):
@@ -293,9 +302,9 @@ View in ClawController: http://localhost:5001/tasks/{task.id}"""
             stderr=subprocess.DEVNULL,
             cwd=str(Path.home())
         )
-        print(f"Notified reviewer {reviewer_id} of task needing review: {task.title}")
+        logger.info("Notified reviewer %s of task needing review: %s", reviewer_id, task.title)
     except Exception as e:
-        print(f"Failed to notify reviewer {reviewer_id}: {e}")
+        logger.error("Failed to notify reviewer %s: %s", reviewer_id, e)
 
 # Helper to notify agent when their task is rejected
 def notify_task_rejected(task, feedback: str = None, rejected_by: str = None):
@@ -329,9 +338,9 @@ View in ClawController: http://localhost:5001"""
             stderr=subprocess.DEVNULL,
             cwd=str(Path.home())
         )
-        print(f"Notified agent {task.assignee_id} of task rejection: {task.title}")
+        logger.info("Notified agent %s of task rejection: %s", task.assignee_id, task.title)
     except Exception as e:
-        print(f"Failed to notify agent {task.assignee_id} of rejection: {e}")
+        logger.error("Failed to notify agent %s of rejection: %s", task.assignee_id, e)
 
 # Helper to notify agent when task is assigned
 def notify_agent_of_task(task):
@@ -367,15 +376,15 @@ Post an activity with 'completed' or 'done' in the message - the system will aut
             stderr=subprocess.DEVNULL,
             cwd=str(Path.home())
         )
-        print(f"Notified agent {task.assignee_id} of task: {task.title}")
+        logger.info("Notified agent %s of task: %s", task.assignee_id, task.title)
     except Exception as e:
-        print(f"Failed to notify agent {task.assignee_id}: {e}")
+        logger.error("Failed to notify agent %s: %s", task.assignee_id, e)
 
 # Startup
 @app.on_event("startup")
 async def startup():
     init_db()
-    print("ClawController API started")
+    logger.info("ClawController API started")
     # Start background monitors
     asyncio.create_task(openclaw_session_monitor())
     asyncio.create_task(start_gateway_watchdog())
@@ -386,7 +395,7 @@ async def openclaw_session_monitor():
     When an agent session is active and has an ASSIGNED task, 
     auto-transitions to IN_PROGRESS.
     """
-    print("OpenClaw session monitor started")
+    logger.info("OpenClaw session monitor started")
     
     while True:
         try:
@@ -439,7 +448,7 @@ async def openclaw_session_monitor():
                         message=f"⚡ Auto-transitioned to IN_PROGRESS (agent {task.assignee_id} session detected)"
                     )
                     db.add(activity)
-                    print(f"Session monitor: Task '{task.title}' → IN_PROGRESS (agent {task.assignee_id} active)")
+                    logger.info("Session monitor: Task '%s' → IN_PROGRESS (agent %s active)", task.title, task.assignee_id)
                 
                 if assigned_tasks:
                     db.commit()
@@ -453,7 +462,7 @@ async def openclaw_session_monitor():
         except subprocess.TimeoutExpired:
             pass  # OpenClaw command timed out
         except Exception as e:
-            print(f"Session monitor error: {e}")
+            logger.error("Session monitor error: %s", e)
 
 # WebSocket endpoint
 @app.websocket("/ws")
@@ -1242,10 +1251,10 @@ curl -X POST http://localhost:8000/api/tasks/{task.id}/comments -H "Content-Type
             stderr=subprocess.DEVNULL,
             cwd=str(Path.home())
         )
-        print(f"Routed mention to agent {agent_id}")
+        logger.info("Routed mention to agent %s", agent_id)
     except Exception as e:
         # Log error but don't fail the comment creation
-        print(f"Failed to route mention to agent {agent_id}: {e}")
+        logger.error("Failed to route mention to agent %s: %s", agent_id, e)
 
 @app.post("/api/tasks/{task_id}/comments")
 async def add_comment(task_id: str, comment_data: CommentCreate, db: Session = Depends(get_db)):
@@ -2233,7 +2242,7 @@ def get_models():
         )
         
         if result.returncode != 0:
-            print(f"OpenClaw models command failed: {result.stderr}")
+            logger.warning("OpenClaw models command failed: %s", result.stderr)
             raise Exception(f"Command failed with code {result.returncode}")
         
         # Parse OpenClaw JSON response
@@ -2265,17 +2274,17 @@ def get_models():
             })
         
         if available_models:
-            print(f"Fetched {len(available_models)} models from OpenClaw API")
+            logger.info("Fetched %d models from OpenClaw API", len(available_models))
             return available_models
         else:
-            print("No available models found in OpenClaw, using fallback")
+            logger.warning("No available models found in OpenClaw, using fallback")
             return get_fallback_models()
         
     except subprocess.TimeoutExpired:
-        print("OpenClaw models command timed out")
+        logger.warning("OpenClaw models command timed out")
         return get_fallback_models()
     except (subprocess.CalledProcessError, json.JSONDecodeError, Exception) as e:
-        print(f"Failed to fetch models from OpenClaw: {e}")
+        logger.error("Failed to fetch models from OpenClaw: %s", e)
         return get_fallback_models()
 
 def generate_model_alias(model_id: str, model_name: str) -> str:
@@ -2430,11 +2439,11 @@ Choose an appropriate model: opus for complex reasoning, sonnet for general task
                         agentsMd="# AGENTS.md\n\nStandard workspace configuration."
                     )
         except subprocess.TimeoutExpired:
-            print("Agent generation timed out, using fallback")
+            logger.warning("Agent generation timed out, using fallback")
         except json.JSONDecodeError as e:
-            print(f"Failed to parse agent response as JSON: {e}")
+            logger.error("Failed to parse agent response as JSON: %s", e)
         except Exception as e:
-            print(f"Agent generation failed: {e}")
+            logger.error("Agent generation failed: %s", e)
     
     # Fallback: return blank template for user to fill in
     # Generate a reasonable ID from the description
@@ -2887,9 +2896,9 @@ View in ClawController: http://localhost:5001"""
                 stderr=subprocess.DEVNULL,
                 cwd=str(Path.home())
             )
-            print(f"Notified main agent about model fallback for {agent.name}")
+            logger.info("Notified main agent about model fallback for %s", agent.name)
         except Exception as e:
-            print(f"Failed to notify about model fallback: {e}")
+            logger.error("Failed to notify about model fallback: %s", e)
     
     # Log the failure
     await log_activity(db, "model_failure", agent_id=agent_id,
@@ -3024,11 +3033,11 @@ async def setup_background_monitoring():
                 
                 # Only log if there are stuck tasks or notifications sent
                 if result.get("stuck_tasks") or result.get("notifications_sent", 0) > 0:
-                    print(f"Stuck task check: {len(result.get('stuck_tasks', []))} stuck, "
-                          f"{result.get('notifications_sent', 0)} notifications sent")
+                    logger.info("Stuck task check: %d stuck, %d notifications sent",
+                               len(result.get("stuck_tasks", [])), result.get("notifications_sent", 0))
                 
             except Exception as e:
-                print(f"Background stuck task check failed: {e}")
+                logger.error("Background stuck task check failed: %s", e)
     
     # Start background task
     asyncio.create_task(periodic_stuck_task_check())
@@ -3036,7 +3045,7 @@ async def setup_background_monitoring():
 @app.on_event("shutdown")
 async def shutdown():
     """Graceful shutdown: stop background services and close WebSocket connections."""
-    print("ClawController API stopping...")
+    logger.info("ClawController API stopping...")
     stop_gateway_watchdog()
     for connection in list(manager.active_connections):
         try:
@@ -3044,7 +3053,7 @@ async def shutdown():
         except Exception:
             pass
     manager.active_connections.clear()
-    print("ClawController API stopped")
+    logger.info("ClawController API stopped")
 
 # Serve frontend static files — mount as fallback after all API routes
 _frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"

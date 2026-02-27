@@ -16,6 +16,8 @@ from database import SessionLocal
 from models import ActivityLog
 import logging
 
+logger = logging.getLogger("clawcontroller.gateway_watchdog")
+
 # Configuration
 HEALTH_CHECK_INTERVAL = 30  # Check every 30 seconds
 HEALTH_CHECK_TIMEOUT = 10   # Timeout for health check commands
@@ -40,7 +42,7 @@ class GatewayWatchdog:
                 with open(self.state_file, 'r') as f:
                     return json.load(f)
         except Exception as e:
-            logging.warning(f"Failed to load gateway watchdog state: {e}")
+            logger.warning(f"Failed to load gateway watchdog state: {e}")
         
         return {
             "last_check": None,
@@ -62,7 +64,7 @@ class GatewayWatchdog:
             with open(self.state_file, 'w') as f:
                 json.dump(self.state, f, indent=2, default=str)
         except Exception as e:
-            logging.error(f"Failed to save gateway watchdog state: {e}")
+            logger.error(f"Failed to save gateway watchdog state: {e}")
     
     async def check_gateway_health(self) -> Tuple[bool, str]:
         """
@@ -110,7 +112,7 @@ class GatewayWatchdog:
         Returns: (success, message)
         """
         try:
-            logging.info("Attempting to restart OpenClaw gateway...")
+            logger.info("Attempting to restart OpenClaw gateway...")
             
             # Try to restart using openclaw gateway start
             result = await asyncio.wait_for(
@@ -193,10 +195,10 @@ View watchdog status in ClawController dashboard."""
                 cwd=str(Path.home())
             )
             
-            logging.info(f"Sent gateway crash notification (consecutive: {consecutive})")
+            logger.info(f"Sent gateway crash notification (consecutive: {consecutive})")
             
         except Exception as e:
-            logging.error(f"Failed to send crash notification: {e}")
+            logger.error(f"Failed to send crash notification: {e}")
     
     async def notify_recovery(self, recovery_info: Dict):
         """Send recovery notification to main agent."""
@@ -220,10 +222,10 @@ Gateway is now healthy and operational."""
                 cwd=str(Path.home())
             )
             
-            logging.info("Sent gateway recovery notification")
+            logger.info("Sent gateway recovery notification")
             
         except Exception as e:
-            logging.error(f"Failed to send recovery notification: {e}")
+            logger.error(f"Failed to send recovery notification: {e}")
     
     async def log_activity(self, activity_type: str, description: str):
         """Log watchdog activity to database."""
@@ -237,7 +239,7 @@ Gateway is now healthy and operational."""
             db.add(activity)
             db.commit()
         except Exception as e:
-            logging.error(f"Failed to log activity: {e}")
+            logger.error(f"Failed to log activity: {e}")
         finally:
             db.close()
     
@@ -335,7 +337,7 @@ Gateway is now healthy and operational."""
     async def monitor_gateway(self):
         """Main monitoring loop."""
         self.monitoring = True
-        logging.info("Gateway watchdog started")
+        logger.info("Gateway watchdog started")
         await self.log_activity("watchdog_started", "Gateway monitoring started")
         
         while self.monitoring:
@@ -362,13 +364,13 @@ Gateway is now healthy and operational."""
                 self._save_state()
                 
             except Exception as e:
-                logging.error(f"Gateway monitor error: {e}")
+                logger.error(f"Gateway monitor error: {e}")
                 await self.log_activity("monitor_error", f"Monitoring error: {str(e)}")
             
             # Wait before next check
             await asyncio.sleep(HEALTH_CHECK_INTERVAL)
         
-        logging.info("Gateway watchdog stopped")
+        logger.info("Gateway watchdog stopped")
         await self.log_activity("watchdog_stopped", "Gateway monitoring stopped")
     
     def stop_monitoring(self):

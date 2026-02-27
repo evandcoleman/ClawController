@@ -2,8 +2,10 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 from models import Base, Agent, AgentRole, AgentStatus
 import os
-from pathlib import Path
 import logging
+from pathlib import Path
+
+logger = logging.getLogger("clawcontroller.database")
 
 # Get the directory where this script lives
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -26,7 +28,7 @@ def init_db():
     # Auto-migrate missing columns for existing databases
     _run_migrations()
     
-    print("Database initialized. Add agents via the Agent Management panel.")
+    logger.info("Database initialized. Add agents via the Agent Management panel.")
 
 def _run_migrations():
     """Add any missing columns to existing tables (SQLite compatible)."""
@@ -48,9 +50,9 @@ def _run_migrations():
                     if default is not None:
                         sql += f" DEFAULT {default}"
                     conn.execute(text(sql))
-                    print(f"Migration: Added '{col_name}' column to tasks table")
+                    logger.info("Migration: Added '%s' column to tasks table", col_name)
                 except Exception as e:
-                    print(f"Migration warning for {col_name}: {e}")
+                    logger.warning("Migration warning for %s: %s", col_name, e)
         
         # Get existing columns in agents table
         result = conn.execute(text("PRAGMA table_info(agents)"))
@@ -71,9 +73,9 @@ def _run_migrations():
                     if default is not None:
                         sql += f" DEFAULT {default}"
                     conn.execute(text(sql))
-                    print(f"Migration: Added '{col_name}' column to agents table")
+                    logger.info("Migration: Added '%s' column to agents table", col_name)
                 except Exception as e:
-                    print(f"Migration warning for {col_name}: {e}")
+                    logger.warning("Migration warning for %s: %s", col_name, e)
         
         conn.commit()
 

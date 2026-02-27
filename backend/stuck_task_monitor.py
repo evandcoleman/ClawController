@@ -15,6 +15,8 @@ from database import SessionLocal
 from models import Task, TaskStatus, Agent, AgentStatus
 import logging
 
+logger = logging.getLogger("clawcontroller.stuck_task_monitor")
+
 # Configuration
 STUCK_TASK_THRESHOLDS = {
     TaskStatus.ASSIGNED: timedelta(hours=2),      # 2 hours in ASSIGNED
@@ -49,7 +51,7 @@ class StuckTaskMonitor:
                 with open(self.state_file, 'r') as f:
                     return json.load(f)
         except Exception as e:
-            logging.warning(f"Failed to load stuck task state: {e}")
+            logger.warning(f"Failed to load stuck task state: {e}")
         
         return {
             "stuck_tasks": {},           # task_id -> {first_detected, last_notified, consecutive_count}
@@ -64,7 +66,7 @@ class StuckTaskMonitor:
             with open(self.state_file, 'w') as f:
                 json.dump(self.state, f, indent=2, default=str)
         except Exception as e:
-            logging.error(f"Failed to save stuck task state: {e}")
+            logger.error(f"Failed to save stuck task state: {e}")
     
     def check_stuck_tasks(self) -> Dict:
         """
@@ -108,7 +110,7 @@ class StuckTaskMonitor:
             self._save_state()
             
         except Exception as e:
-            logging.error(f"Error during stuck task check: {e}")
+            logger.error(f"Error during stuck task check: {e}")
             result["error"] = str(e)
         finally:
             db.close()
@@ -207,10 +209,10 @@ View in ClawController: http://localhost:5001"""
                 stderr=subprocess.DEVNULL,
                 cwd=str(Path.home())
             )
-            logging.info(f"Notified main agent about stuck task: {stuck_info['title']}")
+            logger.info(f"Notified main agent about stuck task: {stuck_info['title']}")
             return True
         except Exception as e:
-            logging.error(f"Failed to notify about stuck task {task.id}: {e}")
+            logger.error(f"Failed to notify about stuck task {task.id}: {e}")
             return False
     
     def _update_task_state(self, task_id: str, current_time: datetime):
@@ -256,7 +258,7 @@ View in ClawController: http://localhost:5001"""
                     })
         
         except Exception as e:
-            logging.error(f"Error checking offline agents: {e}")
+            logger.error(f"Error checking offline agents: {e}")
         
         return offline_agents
     
