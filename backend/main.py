@@ -34,8 +34,8 @@ API_KEY_NAME = "X-API-Key"
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    # Apply authentication to all /api endpoints
-    if request.url.path.startswith("/api"):
+    # Apply authentication to all /api endpoints (except health check)
+    if request.url.path.startswith("/api") and request.url.path != "/api/health":
         api_key = request.headers.get(API_KEY_NAME)
         expected_key = os.getenv("CLAW_API_KEY", "claw-default-key")
         if api_key != expected_key:
@@ -56,6 +56,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Health check (unauthenticated — used by Docker HEALTHCHECK and load balancers)
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}
+
 # WebSocket connections
 class ConnectionManager:
     def __init__(self):
@@ -69,10 +74,16 @@ class ConnectionManager:
         self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
+        dead = []
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
-            except:
+            except Exception:
+                dead.append(connection)
+        for connection in dead:
+            try:
+                self.active_connections.remove(connection)
+            except ValueError:
                 pass
 
 manager = ConnectionManager()
@@ -459,6 +470,8 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = None
             # Handle incoming messages if needed
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+    except Exception:
+        manager.disconnect(websocket)
 
 # Agent endpoints
 @app.get("/api/agents", response_model=List[AgentResponse])
@@ -512,7 +525,7 @@ def get_agent_status_from_sessions(agent_id: str) -> str:
             mtime = f.stat().st_mtime
             if mtime > latest_mtime:
                 latest_mtime = mtime
-        except:
+        except Exception:
             continue
     
     if latest_mtime == 0:
@@ -1196,7 +1209,7 @@ def get_agent_id_by_name(name: str, db: Session) -> str | None:
                 # Match by ID or name (case-insensitive)
                 if agent_id.lower() == name.lower() or agent_name.lower() == name.lower():
                     return agent_id
-        except:
+        except Exception:
             pass
     return None
 
@@ -1578,9 +1591,9 @@ def get_agent_info(agent_id: str, db: Session) -> dict:
                         "name": identity.get("name") or agent.get("name") or agent_id,
                         "avatar": identity.get("emoji") or "🤖"
                     }
-        except:
+        except Exception:
             pass
-    
+
     # Fallback to database
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if agent:
@@ -2370,7 +2383,7 @@ def generate_agent_config(request: GenerateAgentRequest):
                 config = json.load(f)
             agents_list = config.get("agents", {}).get("list", [])
             main_agent_exists = any(a.get("id") == "main" for a in agents_list)
-        except:
+        except Exception:
             pass
     
     if main_agent_exists:
@@ -3043,6 +3056,19 @@ async def setup_background_monitoring():
     
     # Start background task
     asyncio.create_task(periodic_stuck_task_check())
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Graceful shutdown: stop background services and close WebSocket connections."""
+    print("ClawController API stopping...")
+    stop_gateway_watchdog()
+    for connection in list(manager.active_connections):
+        try:
+            await connection.close()
+        except Exception:
+            pass
+    manager.active_connections.clear()
+    print("ClawController API stopped")
 
 # Serve frontend static files — mount as fallback after all API routes
 _frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
