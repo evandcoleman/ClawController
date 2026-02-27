@@ -11,7 +11,10 @@ RUN npm run build
 # Stage 2: Python backend + built frontend
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd --system appuser && useradd --system --gid appuser appuser
 
 WORKDIR /app
 
@@ -28,19 +31,23 @@ RUN cd backend && \
 # Copy built frontend from builder stage
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Create logs directory
-RUN mkdir -p logs
+# Copy entrypoint script
+COPY docker-entrypoint.sh ./
+
+# Create directories and set ownership
+RUN mkdir -p logs data && chown -R appuser:appuser /app
+
+# Persistent data volume
+VOLUME /app/data
 
 # Single port — FastAPI serves API + frontend
 EXPOSE 8000
 
 ENV PYTHONUNBUFFERED=1
 
-RUN echo '#!/bin/bash\n\
-set -e\n\
-cd /app/backend\n\
-source venv/bin/activate\n\
-exec python -m uvicorn main:app --host 0.0.0.0 --port 8000\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
-CMD ["/app/entrypoint.sh"]
+USER appuser
+
+CMD ["/app/docker-entrypoint.sh"]

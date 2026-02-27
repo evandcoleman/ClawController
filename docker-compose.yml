@@ -1,0 +1,13 @@
+services:
+  clawcontroller:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - clawcontroller-data:/app/data
+    environment:
+      - CLAW_API_KEY=${CLAW_API_KEY:-claw-default-key}
+    restart: unless-stopped
+
+volumes:
+  clawcontroller-data:

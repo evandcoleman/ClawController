@@ -27,3 +27,23 @@ Thumbs.db
 
 # Screenshots
 screenshots/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.env.*
+
+# Data (persisted via volume)
+data/
+
+# Documentation
+CHANGELOG.md
+AGENT_INSTRUCTIONS.md
+CLAUDE.md
+
+# CI/CD
+.github/

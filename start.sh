@@ -1,5 +1,5 @@
 #!/bin/bash
-export HOME=/home/claw-controller
+export HOME="${HOME:-$(eval echo ~$(whoami))}"
 # ClawController - Start Script
 # Starts both backend and frontend services
 
@@ -31,7 +31,12 @@ fi
 # Kill any existing processes
 pkill -f "uvicorn main:app.*8000" 2>/dev/null || true
 pkill -f "vite.*5001" 2>/dev/null || true
-sleep 1
+
+# Wait up to 5s for processes to actually terminate
+for i in $(seq 1 10); do
+    pgrep -f "uvicorn main:app.*8000" >/dev/null 2>&1 || pgrep -f "vite.*5001" >/dev/null 2>&1 || break
+    sleep 0.5
+done
 
 # Start backend
 echo "Starting backend..."
