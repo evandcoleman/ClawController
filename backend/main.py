@@ -14,16 +14,14 @@ import json
 import asyncio
 import logging
 import os
-import sys
 import glob
 import time
 import subprocess
 import re
 
-# Configure logging — write to stdout so Docker/Nomad log drivers capture it.
-# Uses explicit handler (not basicConfig) because uvicorn configures the root
-# logger before importing the app, making basicConfig a no-op.
-_handler = logging.StreamHandler(sys.stdout)
+# Configure logging — explicit handler so it works even when uvicorn
+# has already configured the root logger (basicConfig would be a no-op).
+_handler = logging.StreamHandler()
 _handler.setFormatter(logging.Formatter(
     "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
