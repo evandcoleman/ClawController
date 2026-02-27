@@ -7,6 +7,7 @@ services:
       - clawcontroller-data:/app/data
     environment:
       - CLAW_API_KEY=${CLAW_API_KEY:-claw-default-key}
+      - OPENCLAW_DIR=${OPENCLAW_DIR:-}
     restart: unless-stopped
 
 volumes:

@@ -26,6 +26,7 @@ from models import (
 )
 from stuck_task_monitor import run_stuck_task_check, get_monitor_status
 from gateway_watchdog import start_gateway_watchdog, stop_gateway_watchdog, get_watchdog_status, run_health_check, manual_restart
+from openclaw_paths import get_config_path, get_openclaw_dir, get_agent_sessions_dir, get_agent_dir, get_default_workspace, is_within_openclaw, is_within_allowed
 
 app = FastAPI(title="ClawController API", version="2.0.0")
 
@@ -503,11 +504,10 @@ def get_agent_status_from_sessions(agent_id: str) -> str:
     if not re.match(r"^[a-zA-Z0-9_-]+$", agent_id):
         return "OFFLINE"
 
-    home = Path.home()
-    sessions_dir = (home / ".openclaw" / "agents" / agent_id / "sessions").resolve()
-    
+    sessions_dir = get_agent_sessions_dir(agent_id)
+
     # Security: ensure sessions_dir is within .openclaw
-    if not str(sessions_dir).startswith(str((home / ".openclaw").resolve())):
+    if not is_within_openclaw(sessions_dir):
         return "OFFLINE"
 
     if not sessions_dir.exists():
@@ -560,8 +560,7 @@ class OpenClawAgentResponse(BaseModel):
 @app.get("/api/openclaw/agents", response_model=List[OpenClawAgentResponse])
 def get_openclaw_agents(db: Session = Depends(get_db)):
     """Get agents from OpenClaw config with real-time status from session activity."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="OpenClaw config not found")
@@ -641,9 +640,8 @@ def get_openclaw_agents(db: Session = Depends(get_db)):
 @app.get("/api/openclaw/status")
 def get_openclaw_status():
     """Check if OpenClaw integration is available."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
-    
+    config_path = get_config_path()
+
     return {
         "available": config_path.exists(),
         "config_path": str(config_path)
@@ -655,8 +653,7 @@ class ImportAgentsRequest(BaseModel):
 @app.post("/api/openclaw/import")
 async def import_agents_from_openclaw(import_request: ImportAgentsRequest, db: Session = Depends(get_db)):
     """Import selected agents from OpenClaw config into ClawController database."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="OpenClaw config not found")
@@ -1194,8 +1191,7 @@ def parse_mentions(content: str) -> list[str]:
 
 def get_agent_id_by_name(name: str, db: Session) -> str | None:
     """Find agent ID by name (case-insensitive)."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     if config_path.exists():
         try:
@@ -1574,8 +1570,7 @@ class SendToAgentRequest(BaseModel):
 
 def get_agent_info(agent_id: str, db: Session) -> dict:
     """Get agent info from OpenClaw config or fallback."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     # First try OpenClaw config
     if config_path.exists():
@@ -2372,8 +2367,7 @@ class GeneratedAgentConfig(BaseModel):
 @app.post("/api/agents/generate", response_model=GeneratedAgentConfig)
 def generate_agent_config(request: GenerateAgentRequest):
     """Generate agent config by routing to main agent (if available)."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     # Check if main agent exists
     main_agent_exists = False
@@ -2503,14 +2497,13 @@ def create_agent(request: CreateAgentRequest):
     if not re.match(r"^[a-zA-Z0-9_-]+$", request.id):
         raise HTTPException(status_code=400, detail="Invalid agent ID. Only alphanumeric, underscores, and hyphens allowed.")
 
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
-    
+    config_path = get_config_path()
+
     # Use new standard paths
-    agent_dir = (home / ".openclaw" / "agents" / request.id).resolve()
+    agent_dir = get_agent_dir(request.id)
 
     # Security: ensure agent_dir is within .openclaw
-    if not str(agent_dir).startswith(str((home / ".openclaw").resolve())):
+    if not is_within_openclaw(agent_dir):
         raise HTTPException(status_code=403, detail="Access denied")
 
     workspace_path = agent_dir / "workspace"
@@ -2583,8 +2576,7 @@ class AgentFilesResponse(BaseModel):
 @app.get("/api/agents/{agent_id}/files", response_model=AgentFilesResponse)
 def get_agent_files(agent_id: str):
     """Get agent workspace files (SOUL.md, AGENTS.md, TOOLS.md)."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     # Read config to get workspace path
     if not config_path.exists():
@@ -2604,42 +2596,38 @@ def get_agent_files(agent_id: str):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     
     # Get agent directory (where config files are stored)
-    agent_dir_raw = agent.get("agentDir", str(home / ".openclaw" / f"workspace-{agent_id}"))
+    agent_dir_raw = agent.get("agentDir", str(get_default_workspace(agent_id)))
     agent_dir = Path(agent_dir_raw).resolve()
-    
+
     # Security: ensure agent_dir is within allowed locations
-    allowed_agent_prefixes = [
-        str(home / ".openclaw"),
-        "/tmp"
-    ]
-    if not any(str(agent_dir).startswith(str(Path(p).resolve())) for p in allowed_agent_prefixes):
+    if not is_within_allowed(agent_dir):
         raise HTTPException(status_code=403, detail="Access denied to agent directory")
 
     # Fallback to old workspace structure if agentDir not specified
     if not agent_dir.exists():
-        workspace_raw = agent.get("workspace", str(home / ".openclaw" / f"workspace-{agent_id}"))
+        workspace_raw = agent.get("workspace", str(get_default_workspace(agent_id)))
         workspace = Path(workspace_raw).resolve()
-        if not any(str(workspace).startswith(str(Path(p).resolve())) for p in allowed_agent_prefixes):
+        if not is_within_allowed(workspace):
             raise HTTPException(status_code=403, detail="Access denied to workspace directory")
         agent_dir = workspace
-    
+
     # Read files (with defaults if missing)
     soul = ""
     tools = ""
     agents_md = ""
-    
+
     soul_path = agent_dir / "SOUL.md"
     if soul_path.exists():
         soul = soul_path.read_text()
-    
+
     tools_path = agent_dir / "TOOLS.md"
     if tools_path.exists():
         tools = tools_path.read_text()
-    
+
     agents_path = agent_dir / "AGENTS.md"
     if agents_path.exists():
         agents_md = agents_path.read_text()
-    
+
     return AgentFilesResponse(soul=soul, tools=tools, agentsMd=agents_md)
 
 
@@ -2651,8 +2639,7 @@ class UpdateAgentFilesRequest(BaseModel):
 @app.put("/api/agents/{agent_id}/files")
 def update_agent_files(agent_id: str, request: UpdateAgentFilesRequest):
     """Update agent workspace files."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     # Read config to get workspace path
     if not config_path.exists():
@@ -2672,22 +2659,18 @@ def update_agent_files(agent_id: str, request: UpdateAgentFilesRequest):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     
     # Get agent directory (where config files are stored)
-    agent_dir_raw = agent.get("agentDir", str(home / ".openclaw" / f"workspace-{agent_id}"))
+    agent_dir_raw = agent.get("agentDir", str(get_default_workspace(agent_id)))
     agent_dir = Path(agent_dir_raw).resolve()
-    
+
     # Security: ensure agent_dir is within allowed locations
-    allowed_agent_prefixes = [
-        str(home / ".openclaw"),
-        "/tmp"
-    ]
-    if not any(str(agent_dir).startswith(str(Path(p).resolve())) for p in allowed_agent_prefixes):
+    if not is_within_allowed(agent_dir):
         raise HTTPException(status_code=403, detail="Access denied to agent directory")
 
     # Fallback to old workspace structure if agentDir not specified
     if not agent_dir.exists():
-        workspace_raw = agent.get("workspace", str(home / ".openclaw" / f"workspace-{agent_id}"))
+        workspace_raw = agent.get("workspace", str(get_default_workspace(agent_id)))
         workspace = Path(workspace_raw).resolve()
-        if not any(str(workspace).startswith(str(Path(p).resolve())) for p in allowed_agent_prefixes):
+        if not is_within_allowed(workspace):
             raise HTTPException(status_code=403, detail="Access denied to workspace directory")
         agent_dir = workspace
     
@@ -2734,8 +2717,7 @@ class UpdateAgentModelsRequest(BaseModel):
 @app.patch("/api/agents/{agent_id}")
 def update_agent_config(agent_id: str, request: UpdateAgentConfigRequest):
     """Update agent config (model, identity) in openclaw.json."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="OpenClaw config not found")
@@ -2787,8 +2769,7 @@ def update_agent_config(agent_id: str, request: UpdateAgentConfigRequest):
 @app.delete("/api/agents/{agent_id}")
 def delete_agent(agent_id: str):
     """Remove agent from config (keeps workspace as archive)."""
-    home = Path.home()
-    config_path = home / ".openclaw" / "openclaw.json"
+    config_path = get_config_path()
     
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="OpenClaw config not found")
@@ -2959,17 +2940,12 @@ async def preview_file(path: str):
     from fastapi.responses import FileResponse, PlainTextResponse
     
     # Security: only allow files within allowed directories and prevent traversal
-    allowed_prefixes = [
-        str(Path.home() / ".openclaw"),
-        "/tmp"
-    ]
-
     try:
         requested_path = Path(path).resolve()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    if not any(str(requested_path).startswith(str(Path(prefix).resolve())) for prefix in allowed_prefixes):
+    if not is_within_allowed(requested_path):
         raise HTTPException(status_code=403, detail="Access denied")
 
     if not requested_path.exists():
