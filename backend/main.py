@@ -19,13 +19,16 @@ import time
 import subprocess
 import re
 
-# Configure logging: INFO+ to stdout, WARNING+ to stderr
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+# Configure logging — explicit handler so it works even when uvicorn
+# has already configured the root logger (basicConfig would be a no-op).
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-)
+))
 logger = logging.getLogger("clawcontroller")
+logger.setLevel(logging.INFO)
+logger.addHandler(_handler)
 
 from database import init_db, get_db, SessionLocal
 from models import (
